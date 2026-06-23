@@ -9,8 +9,11 @@ from tqdm import tqdm
 from configs import configure_argument_parser, configure_logging
 from constants import BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL, PEP_URL
 from outputs import control_output
-from utils import (build_pep_results, find_tag, get_pep_status_from_page,
-                   get_pep_table, get_response, parse_pep_row)
+from utils import (
+    get_response, find_tag,
+    get_pep_table, parse_pep_row,
+    get_pep_status_from_page, build_pep_results
+)
 
 WHATS_NEW_URL = 'https://docs.python.org/3/whatsnew/'
 
@@ -124,6 +127,7 @@ def download(session):
 
 
 def pep(session):
+    """Парсинг списка PEP и сбор статусов."""
     response = get_response(session, PEP_URL)
     if response is None:
         logging.error('Не удалось загрузить страницу PEP')

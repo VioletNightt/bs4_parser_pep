@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from requests import RequestException
 
 from exceptions import ParserFindTagException
-from src.constants import PEP_URL
+from constants import PEP_URL
 
 
 def get_response(session, url):
@@ -32,10 +32,13 @@ def find_tag(soup, tag, attrs=None):
 
 
 def get_pep_table(soup):
-    """Возвращает таблицу со списком PEP."""
+    """Возвращает таблицу со списком PEP (старый сайт)."""
     table = soup.find('table', class_='pep-zero-table')
     if table is None:
-        table = soup.find('table', {'class': 'rfc2822'})
+        tables = soup.find_all('table')
+        for t in tables:
+            if t.find('a', href=re.compile(r'/peps/pep-\d+')):
+                return t
     return table
 
 
@@ -44,15 +47,18 @@ def parse_pep_row(row):
     Извлекает из строки таблицы:
     - номер PEP (int)
     - ссылку (str)
-    - ключ статуса (str)
+    - ключ статуса (str) – буквенный код из первой колонки или ''.
     Возвращает кортеж (pep_num, link, status_key) или None.
     """
     cols = row.find_all('td')
-    if len(cols) < 3:
+    if len(cols) < 2:
         return None
 
     first_col_text = cols[0].get_text(strip=True)
-    status_key = first_col_text[1:] if len(first_col_text) > 1 else ''
+    if re.match(r'^[A-Z]+$', first_col_text):
+        status_key = first_col_text
+    else:
+        status_key = ''
 
     link_tag = cols[1].find('a')
     if link_tag is None:
@@ -63,7 +69,6 @@ def parse_pep_row(row):
     number_match = re.search(r'(\d+)', pep_number)
     if not number_match:
         return None
-
     pep_num = int(number_match.group(1))
     if pep_num == 0:
         return None
@@ -73,34 +78,67 @@ def parse_pep_row(row):
 
 
 def get_pep_status_from_page(session, pep_url, pep_num):
-    """Загружает страницу PEP, извлекает статус, сравнивает с ожидаемым."""
+    """Извлекает статус PEP со страницы документа."""
     response = get_response(session, pep_url)
     if response is None:
         logging.warning(f'Не удалось загрузить страницу PEP {pep_num}')
         return None
 
-    pep_soup = BeautifulSoup(response.text, features='lxml')
-    dl = pep_soup.find('dl', class_='rfc2822 field-list simple')
-    if dl is None:
-        dl = pep_soup.find('dl')
-        if dl is None:
-            logging.warning(f'Не найден блок dl для PEP {pep_num}')
-            return None
+    soup = BeautifulSoup(response.text, 'lxml')
 
-    status_dt = dl.find('dt', string='Status')
-    if status_dt is None:
-        status_dt = dl.find('dt', string=lambda s: s and 'Status' in s)
-        if status_dt is None:
-            logging.warning(f'Не найден тег dt со статусом для PEP {pep_num}')
-            return None
+    status = (
+        _extract_from_dl_field_list(soup) or
+        _extract_from_dt_status(soup) or
+        _extract_from_status_label_in_tags(soup) or
+        _extract_from_full_text(soup)
+    )
 
-    status_dd = status_dt.find_next_sibling('dd')
-    if status_dd is None:
-        logging.warning(f'Не найден тег dd со статусом для PEP {pep_num}')
-        return None
+    if status is None:
+        logging.warning(f'Не удалось извлечь статус для PEP {pep_num}')
+    return status
 
-    status_from_page = status_dd.get_text(strip=True)
-    return status_from_page
+
+def _extract_from_dl_field_list(soup):
+    """Стратегия 1: поиск <dl> с классом 'field-list' или 'rfc2822'."""
+    dl = soup.find('dl', class_=re.compile(r'field-list|rfc2822'))
+    if dl:
+        dt = dl.find('dt', string=re.compile(r'Status', re.I))
+        if dt:
+            dd = dt.find_next_sibling('dd')
+            if dd:
+                return dd.get_text(strip=True) or None
+    return None
+
+
+def _extract_from_dt_status(soup):
+    """Стратегия 2: любой <dt> со словом 'Status' прямо в soup."""
+    dt = soup.find('dt', string=re.compile(r'Status', re.I))
+    if dt:
+        dd = dt.find_next_sibling('dd')
+        if dd:
+            return dd.get_text(strip=True) or None
+    return None
+
+
+def _extract_from_status_label_in_tags(soup):
+    """Стратегия 3: ищем 'Status: ...' в тегах <p>, <span>, <div>."""
+    status_pattern = re.compile(r'Status:\s*(.+)', re.I)
+    for tag in soup.find_all(['p', 'span', 'div']):
+        if tag.string and 'Status:' in tag.string:
+            match = status_pattern.search(tag.string)
+            if match:
+                return match.group(1).strip()
+    return None
+
+
+def _extract_from_full_text(soup):
+    """Стратегия 4: поиск по всему тексту страницы."""
+    text = soup.get_text()
+    status_pattern = re.compile(r'Status:\s*(.+)', re.I)
+    match = status_pattern.search(text)
+    if match:
+        return match.group(1).strip()
+    return None
 
 
 def build_pep_results(pep_data):
