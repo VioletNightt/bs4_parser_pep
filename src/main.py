@@ -7,13 +7,10 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 
 from configs import configure_argument_parser, configure_logging
-from constants import BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL, PEP_URL
+from constants import BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL
 from outputs import control_output
-from utils import (
-    get_response, find_tag,
-    get_pep_table, parse_pep_row,
-    get_pep_status_from_page, build_pep_results
-)
+from utils import (build_pep_results, find_tag, get_pep_status_from_page,
+                   get_pep_table, get_response)
 
 WHATS_NEW_URL = 'https://docs.python.org/3/whatsnew/'
 
@@ -127,47 +124,34 @@ def download(session):
 
 
 def pep(session):
-    """Парсинг списка PEP и сбор статусов."""
-    response = get_response(session, PEP_URL)
-    if response is None:
-        logging.error('Не удалось загрузить страницу PEP')
+    """Парсинг документов PEP: подсчёт статусов и логирование несовпадений."""
+    pep_list = get_pep_table(session)
+    if pep_list is None:
+        logging.error('Не удалось загрузить список PEP')
         return
 
-    soup = BeautifulSoup(response.text, features='lxml')
-    table = get_pep_table(soup)
-    if table is None:
-        logging.error('Не найдена таблица со списком PEP')
-        return
+    status_count = {}
+    total = 0
 
-    pep_data = []
-    rows = table.find_all('tr')
-    for row in tqdm(rows[1:], desc="Сбор данных о PEP"):
-        parsed = parse_pep_row(row)
-        if parsed is None:
+    for pep_number, pep_url, preview_status_char in tqdm(
+                    pep_list, desc='Обработка PEP'):
+        expected_statuses = EXPECTED_STATUS.get(preview_status_char, ())
+
+        actual_status = get_pep_status_from_page(session, pep_url)
+        if actual_status is None:
             continue
 
-        pep_num, full_link, status_key = parsed
-        status_from_page = get_pep_status_from_page(
-            session, full_link, pep_num)
-        if status_from_page is None:
-            continue
-
-        expected_statuses = EXPECTED_STATUS.get(status_key, ())
-        if expected_statuses and status_from_page not in expected_statuses:
+        if actual_status not in expected_statuses:
             logging.info(
-                f'Несовпадающие статусы:\n'
-                f'{full_link}\n'
-                f'Статус в карточке: {status_from_page}\n'
-                f'Ожидаемые статусы: {list(expected_statuses)}\n'
+                f'Несовпадающие статусы:\n{pep_url}\n'
+                f'Статус в карточке: {actual_status}\n'
+                f'Ожидаемые статусы: {expected_statuses}'
             )
 
-        pep_data.append({
-            'number': pep_num,
-            'link': full_link,
-            'status': status_from_page,
-        })
+        status_count[actual_status] = status_count.get(actual_status, 0) + 1
+        total += 1
 
-    return build_pep_results(pep_data)
+    return build_pep_results(status_count, total)
 
 
 MODE_TO_FUNCTION = {

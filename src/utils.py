@@ -1,13 +1,13 @@
 # utils.py
+import json
 import logging
-import re
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from requests import RequestException
 
-from exceptions import ParserFindTagException
 from constants import PEP_URL
+from exceptions import ParserFindTagException
 
 
 def get_response(session, url):
@@ -31,124 +31,71 @@ def find_tag(soup, tag, attrs=None):
     return searched_tag
 
 
-def get_pep_table(soup):
-    """Возвращает таблицу со списком PEP (старый сайт)."""
-    table = soup.find('table', class_='pep-zero-table')
-    if table is None:
-        tables = soup.find_all('table')
-        for t in tables:
-            if t.find('a', href=re.compile(r'/peps/pep-\d+')):
-                return t
-    return table
-
-
-def parse_pep_row(row):
+def get_pep_table(session):
     """
-    Извлекает из строки таблицы:
-    - номер PEP (int)
-    - ссылку (str)
-    - ключ статуса (str) – буквенный код из первой колонки или ''.
-    Возвращает кортеж (pep_num, link, status_key) или None.
+    Получает список всех PEP через JSON API.
+    Возвращает список кортежей (номер, полный URL,
+    предварительный статус-буква).
     """
-    cols = row.find_all('td')
-    if len(cols) < 2:
+    api_url = 'https://peps.python.org/api/peps.json'
+    response = get_response(session, api_url)
+    if response is None:
+        return None
+    try:
+        data = response.json()
+    except json.JSONDecodeError:
+        logging.error('Не удалось распарсить JSON со списком PEP')
         return None
 
-    first_col_text = cols[0].get_text(strip=True)
-    if re.match(r'^[A-Z]+$', first_col_text):
-        status_key = first_col_text
-    else:
-        status_key = ''
-
-    link_tag = cols[1].find('a')
-    if link_tag is None:
-        return None
-
-    href = link_tag.get('href')
-    pep_number = link_tag.get_text(strip=True)
-    number_match = re.search(r'(\d+)', pep_number)
-    if not number_match:
-        return None
-    pep_num = int(number_match.group(1))
-    if pep_num == 0:
-        return None
-
-    full_link = urljoin(PEP_URL, href)
-    return pep_num, full_link, status_key
+    result = []
+    for pep_id, pep_info in data.items():
+        if pep_id == '0':
+            continue
+        number = pep_info.get('number')
+        if not number:
+            continue
+        pep_url = urljoin(PEP_URL, f'pep-{number:0>4}/')
+        pep_type = pep_info.get('type', '')
+        pep_status = pep_info.get('status', '')
+        type_letter = pep_type[0] if pep_type else ''
+        if pep_status in ('Active', 'Draft'):
+            status_letter = ''
+        else:
+            status_letter = pep_status[0] if pep_status else ''
+        preview_status = type_letter + status_letter
+        result.append((number, pep_url, preview_status))
+    return result
 
 
-def get_pep_status_from_page(session, pep_url, pep_num):
-    """Извлекает статус PEP со страницы документа."""
+def get_pep_status_from_page(session, pep_url):
+    """Получает актуальный статус со страницы PEP."""
     response = get_response(session, pep_url)
     if response is None:
-        logging.warning(f'Не удалось загрузить страницу PEP {pep_num}')
         return None
-
     soup = BeautifulSoup(response.text, 'lxml')
 
-    status = (
-        _extract_from_dl_field_list(soup) or
-        _extract_from_dt_status(soup) or
-        _extract_from_status_label_in_tags(soup) or
-        _extract_from_full_text(soup)
+    status_dt = soup.find(
+        lambda tag: tag.name == 'dt' and tag.get_text(
+            strip=True).startswith('Status')
     )
+    if status_dt is None:
+        logging.warning(f'Не найден тег dt со статусом на странице {pep_url}')
+        return None
 
-    if status is None:
-        logging.warning(f'Не удалось извлечь статус для PEP {pep_num}')
-    return status
+    status_dd = status_dt.find_next_sibling('dd')
+    if status_dd is None:
+        status_dd = status_dt.find_next('dd')
+    if status_dd is None:
+        logging.warning(f'Не найден тег dd со статусом на странице {pep_url}')
+        return None
 
-
-def _extract_from_dl_field_list(soup):
-    """Стратегия 1: поиск <dl> с классом 'field-list' или 'rfc2822'."""
-    dl = soup.find('dl', class_=re.compile(r'field-list|rfc2822'))
-    if dl:
-        dt = dl.find('dt', string=re.compile(r'Status', re.I))
-        if dt:
-            dd = dt.find_next_sibling('dd')
-            if dd:
-                return dd.get_text(strip=True) or None
-    return None
+    return status_dd.get_text(strip=True)
 
 
-def _extract_from_dt_status(soup):
-    """Стратегия 2: любой <dt> со словом 'Status' прямо в soup."""
-    dt = soup.find('dt', string=re.compile(r'Status', re.I))
-    if dt:
-        dd = dt.find_next_sibling('dd')
-        if dd:
-            return dd.get_text(strip=True) or None
-    return None
-
-
-def _extract_from_status_label_in_tags(soup):
-    """Стратегия 3: ищем 'Status: ...' в тегах <p>, <span>, <div>."""
-    status_pattern = re.compile(r'Status:\s*(.+)', re.I)
-    for tag in soup.find_all(['p', 'span', 'div']):
-        if tag.string and 'Status:' in tag.string:
-            match = status_pattern.search(tag.string)
-            if match:
-                return match.group(1).strip()
-    return None
-
-
-def _extract_from_full_text(soup):
-    """Стратегия 4: поиск по всему тексту страницы."""
-    text = soup.get_text()
-    status_pattern = re.compile(r'Status:\s*(.+)', re.I)
-    match = status_pattern.search(text)
-    if match:
-        return match.group(1).strip()
-    return None
-
-
-def build_pep_results(pep_data):
-    """Подсчитывает статусы и формирует итоговую таблицу."""
-    from collections import Counter
-    status_counter = Counter(item['status'] for item in pep_data)
-    total_pep = len(pep_data)
-
+def build_pep_results(status_count, total):
+    """Формирует итоговый список кортежей для вывода."""
     results = [('Статус', 'Количество')]
-    for status, count in sorted(status_counter.items()):
+    for status, count in sorted(status_count.items()):
         results.append((status, count))
-    results.append(('Total', total_pep))
+    results.append(('Total', total))
     return results

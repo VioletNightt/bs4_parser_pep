@@ -1,4 +1,3 @@
-# outputs.py
 import csv
 import datetime as dt
 import logging
