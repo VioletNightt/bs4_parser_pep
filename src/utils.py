@@ -1,32 +1,28 @@
-# utils.py
 import json
-import logging
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 from requests import RequestException
 
 from constants import PEP_URL
-from exceptions import ParserFindTagException
+from exceptions import ParserFindTagException, ParserConnectionError
 
 
 def get_response(session, url):
+    """Возвращает ответ или выбрасывает исключение."""
     try:
         response = session.get(url)
         response.encoding = 'utf-8'
         return response
     except RequestException:
-        logging.exception(
-            f'Возникла ошибка при загрузке страницы {url}',
-            stack_info=True
-        )
+        raise ParserConnectionError(f'Ошибка при загрузке страницы {url}')
 
 
 def find_tag(soup, tag, attrs=None):
+    """Ищет тег и выбрасывает исключение, если не найден."""
     searched_tag = soup.find(tag, attrs=(attrs or {}))
     if searched_tag is None:
         error_msg = f'Не найден тег {tag} {attrs}'
-        logging.error(error_msg, stack_info=True)
         raise ParserFindTagException(error_msg)
     return searched_tag
 
@@ -39,13 +35,11 @@ def get_pep_table(session):
     """
     api_url = 'https://peps.python.org/api/peps.json'
     response = get_response(session, api_url)
-    if response is None:
-        return None
     try:
         data = response.json()
     except json.JSONDecodeError:
-        logging.error('Не удалось распарсить JSON со списком PEP')
-        return None
+        raise ParserConnectionError(
+            'Не удалось распарсить JSON со списком PEP')
 
     result = []
     for pep_id, pep_info in data.items():
@@ -70,8 +64,6 @@ def get_pep_table(session):
 def get_pep_status_from_page(session, pep_url):
     """Получает актуальный статус со страницы PEP."""
     response = get_response(session, pep_url)
-    if response is None:
-        return None
     soup = BeautifulSoup(response.text, 'lxml')
 
     status_dt = soup.find(
@@ -79,15 +71,15 @@ def get_pep_status_from_page(session, pep_url):
             strip=True).startswith('Status')
     )
     if status_dt is None:
-        logging.warning(f'Не найден тег dt со статусом на странице {pep_url}')
-        return None
+        raise ParserFindTagException(
+            f'Не найден тег dt со статусом на странице {pep_url}')
 
     status_dd = status_dt.find_next_sibling('dd')
     if status_dd is None:
         status_dd = status_dt.find_next('dd')
     if status_dd is None:
-        logging.warning(f'Не найден тег dd со статусом на странице {pep_url}')
-        return None
+        raise ParserFindTagException(
+            f'Не найден тег dd со статусом на странице {pep_url}')
 
     return status_dd.get_text(strip=True)
 
