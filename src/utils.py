@@ -22,8 +22,7 @@ def find_tag(soup, tag, attrs=None):
     """Ищет тег и выбрасывает исключение, если не найден."""
     searched_tag = soup.find(tag, attrs=(attrs or {}))
     if searched_tag is None:
-        error_msg = f'Не найден тег {tag} {attrs}'
-        raise ParserFindTagException(error_msg)
+        raise ParserFindTagException(f'Не найден тег {tag} {attrs}')
     return searched_tag
 
 
@@ -82,12 +81,3 @@ def get_pep_status_from_page(session, pep_url):
             f'Не найден тег dd со статусом на странице {pep_url}')
 
     return status_dd.get_text(strip=True)
-
-
-def build_pep_results(status_count, total):
-    """Формирует итоговый список кортежей для вывода."""
-    results = [('Статус', 'Количество')]
-    for status, count in sorted(status_count.items()):
-        results.append((status, count))
-    results.append(('Total', total))
-    return results

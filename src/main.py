@@ -12,7 +12,7 @@ from constants import BASE_DIR, EXPECTED_STATUS, MAIN_DOC_URL
 from outputs import control_output
 from utils import (
     get_response, find_tag, get_pep_table,
-    get_pep_status_from_page, build_pep_results
+    get_pep_status_from_page
 )
 from exceptions import ParserConnectionError, ParserFindTagException
 
@@ -23,14 +23,9 @@ WHATS_NEW_URL = 'https://docs.python.org/3/whatsnew/'
 def whats_new(session):
     """Парсинг страницы What's New в Python."""
     whats_new_url = urljoin(MAIN_DOC_URL, 'whatsnew/')
-    try:
-        response = get_response(session, whats_new_url)
-        soup = BeautifulSoup(response.text, 'lxml')
-    except ParserConnectionError as e:
-        logging.error(f'Не удалось загрузить страницу What\'s New: {e}')
-        return
+    response = get_response(session, whats_new_url)
+    soup = BeautifulSoup(response.text, 'lxml')
 
-    # Используем CSS-селектор
     sections = soup.select(
         '#what-s-new-in-python div.toctree-wrapper li.toctree-l1')
     results = [('Ссылка на статью', 'Заголовок', 'Редактор, автор')]
@@ -46,14 +41,15 @@ def whats_new(session):
 
         try:
             response = get_response(session, version_link)
-            version_soup = BeautifulSoup(response.text, 'lxml')
-            h1 = version_soup.find('h1')
-            dl = version_soup.find('dl')
-            dl_text = dl.text.replace('\n', ' ') if dl else ''
-            results.append((version_link, h1.text if h1 else '', dl_text))
-        except (ParserConnectionError, ParserFindTagException) as e:
+        except ParserConnectionError as e:
             errors.append(f'{e} при загрузке {version_link}')
             continue
+
+        version_soup = BeautifulSoup(response.text, 'lxml')
+        h1 = version_soup.find('h1')
+        dl = version_soup.find('dl')
+        dl_text = dl.text.replace('\n', ' ') if dl else ''
+        results.append((version_link, h1.text if h1 else '', dl_text))
 
     for err in errors:
         logging.warning(err)
@@ -63,12 +59,8 @@ def whats_new(session):
 
 def latest_versions(session):
     """Парсинг боковой панели для получения списка версий Python."""
-    try:
-        response = get_response(session, MAIN_DOC_URL)
-        soup = BeautifulSoup(response.text, 'lxml')
-    except ParserConnectionError as e:
-        logging.error(f'Не удалось загрузить страницу: {e}')
-        return
+    response = get_response(session, MAIN_DOC_URL)
+    soup = BeautifulSoup(response.text, 'lxml')
 
     sidebar = find_tag(soup, 'div', {'class': 'sphinxsidebarwrapper'})
     ul_tags = sidebar.find_all('ul')
@@ -102,12 +94,8 @@ def download(session):
     downloads_dir.mkdir(exist_ok=True)
 
     downloads_url = urljoin(MAIN_DOC_URL, 'download.html')
-    try:
-        response = get_response(session, downloads_url)
-        soup = BeautifulSoup(response.text, 'lxml')
-    except ParserConnectionError as e:
-        logging.error(f'Не удалось загрузить страницу download.html: {e}')
-        return
+    response = get_response(session, downloads_url)
+    soup = BeautifulSoup(response.text, 'lxml')
 
     zip_link = None
     for a_tag in soup.find_all('a', href=True):
@@ -116,8 +104,7 @@ def download(session):
             break
 
     if zip_link is None:
-        logging.error('Не найдена ссылка на ZIP архив')
-        return
+        raise ParserFindTagException('Не найдена ссылка на ZIP архив')
 
     archive_url = urljoin(downloads_url, zip_link)
     filename = archive_url.split('/')[-1]
@@ -133,42 +120,43 @@ def download(session):
 
 def pep(session):
     """Парсинг документов PEP: подсчёт статусов и логирование несовпадений."""
-    try:
-        pep_list = get_pep_table(session)
-    except (ParserConnectionError, ParserFindTagException) as e:
-        logging.error(f'Не удалось загрузить список PEP: {e}')
-        return
+    pep_list = get_pep_table(session)
 
     status_count = defaultdict(int)
     errors = []
+    mismatches = []
 
     for pep_number, pep_url, preview_status_char in tqdm(
             pep_list, desc='Обработка PEP'):
         expected_statuses = EXPECTED_STATUS.get(preview_status_char, ())
         try:
             actual_status = get_pep_status_from_page(session, pep_url)
-            if actual_status is None:
-                errors.append(
-                    f'Не удалось получить статус для PEP {pep_number}')
-                continue
-
-            if actual_status not in expected_statuses:
-                errors.append(
-                    f'Несовпадающие статусы:\n{pep_url}\n'
-                    f'Статус в карточке: {actual_status}\n'
-                    f'Ожидаемые статусы: {expected_statuses}'
-                )
-
-            status_count[actual_status] += 1
         except (ParserConnectionError, ParserFindTagException) as e:
             errors.append(f'Ошибка при обработке PEP {pep_number}: {e}')
             continue
 
-    for err in errors:
-        logging.info(err)
+        if actual_status is None:
+            errors.append(f'Не удалось получить статус для PEP {pep_number}')
+            continue
 
-    total = sum(status_count.values())
-    return build_pep_results(status_count, total)
+        if actual_status not in expected_statuses:
+            mismatches.append(
+                f'Несовпадающие статусы:\n{pep_url}\n'
+                f'Статус в карточке: {actual_status}\n'
+                f'Ожидаемые статусы: {expected_statuses}'
+            )
+
+        status_count[actual_status] += 1
+
+    for err in errors:
+        logging.error(err)
+    for mismatch in mismatches:
+        logging.info(mismatch)
+
+    # Формируем итоговую таблицу
+    return [('Статус', 'Количество'),
+            *status_count.items(),
+            ('Всего', sum(status_count.values()))]
 
 
 MODE_TO_FUNCTION = {
